@@ -229,7 +229,7 @@ async function startAR(){
     mindarThree = new MindARThree({
       container: stage, imageTargetSrc: TARGET,
       uiLoading:'no', uiScanning:'no', uiError:'no',
-      filterMinCF:.0005, filterBeta:.005, warmupTolerance:3, missTolerance:12,
+      filterMinCF:.001, filterBeta:1000, warmupTolerance:3, missTolerance:5,
     });
     const {renderer, scene, camera} = mindarThree;
     const anchor = mindarThree.addAnchor(0);
