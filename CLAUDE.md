@@ -2,6 +2,9 @@
 
 - `index.html` + `mural.mind`: the web AR app, served by GitHub Pages from the `gh-pages` branch.
   After changing them on `main`, push `main:gh-pages` too.
+- The page is also on Azure Static Web Apps (free tier, site `popup-places-web`):
+  https://agreeable-grass-066b5e81e.5.azurestaticapps.net — `deploy/azure-web.sh` redeploys it.
+  After changing `index.html` or `mural.mind`, run that as well as pushing `gh-pages`.
 - `server/`: API v0 (Node 22+, no dependencies). `node --test server/test.mjs` must pass.
 - `deploy/azure.sh`: deploys `server/` to Azure App Service in resource group `nxrdi-mural-ar-rg`.
   The subscription id comes from the owner, not from this repo. Re-run it to ship API changes.
