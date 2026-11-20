@@ -67,7 +67,13 @@
   #pmsg{font-size:13px;color:#ffd9a8;min-height:0}
   #pmsg:empty{display:none}
   .row{display:flex;gap:6px;flex-wrap:wrap}
-  #panel.min .row,#panel.min #promptRow,#panel.min #pmsg{display:none}
+  #shareRow,#social{display:none}
+  #hud.own #shareRow,#hud.remote #social{display:flex}
+  #hud.remote #promptRow,#hud.remote #chars,#hud.remote #moves{display:none}
+  #panel.min .row,#panel.min #promptRow,#panel.min #pmsg{display:none !important}
+  .chip:disabled{opacity:.6}
+  #nearMsg{color:var(--mute);font-size:15px;margin-bottom:10px}
+  .place.near{padding:12px 14px}
 
   /* snapshot */
   #shot{background:rgba(4,14,18,.96);align-items:center;justify-content:center;gap:16px;z-index:20}
@@ -100,6 +106,10 @@
   <h2>My places</h2>
   <div id="places"></div>
   <div id="empty">Places you create are saved on this phone and show up here.</div>
+  <h2>Nearby</h2>
+  <div id="nearby"></div>
+  <div id="nearMsg"></div>
+  <button class="big secondary" id="findNearby">Find places near me<small>See what other people have brought to life around you</small></button>
 </div>
 
 <!-- Capture -->
@@ -133,6 +143,8 @@
       <div class="row" id="moves">
         <button class="chip" data-move="hop">Jump over</button><button class="chip" data-move="dance">Dance</button><button class="chip" data-move="peek">Peek</button><button class="chip" data-move="fly">Fly around</button>
       </div>
+      <div class="row" id="shareRow"><button class="chip" id="share">Share with people nearby</button></div>
+      <div class="row" id="social"><button class="chip" id="like">♥ Like</button><button class="chip" id="flag">Report</button></div>
     </div>
   </div>
 </div>
@@ -413,6 +425,90 @@ async function renderPlaces(){
 }
 
 /* =====================================================================
+   Shared places (the API in server/): publish, nearby, like, report
+   ===================================================================== */
+const API = ['localhost','127.0.0.1'].includes(location.hostname) ? 'http://localhost:8080' : 'https://popup-places-api.azurewebsites.net';
+let device=null;
+function deviceId(){
+  if(device) return device;
+  try{ device=localStorage.getItem('pp-device'); }catch(e){}
+  if(!device){ device=crypto.randomUUID?.() || 'd-'+Date.now().toString(36)+Math.random().toString(36).slice(2,12); try{ localStorage.setItem('pp-device',device); }catch(e){} }
+  return device;
+}
+async function api(path,{method='GET',body}={}){
+  let r;
+  try{ r=await fetch(API+path,{method,headers:{'x-device-id':deviceId(),...(body?{'content-type':'application/json'}:{})},body:body?JSON.stringify(body):undefined}); }
+  catch(e){ throw new Error('Could not reach the server. Check your connection and try again.'); }
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok){ const t=j.error||'Something went wrong. Please try again.'; throw Object.assign(new Error(t[0].toUpperCase()+t.slice(1)+'.'),{status:r.status}); }
+  return j;
+}
+const locate=()=>new Promise((res,rej)=>{ if(!navigator.geolocation) return rej(new Error('no geolocation'));
+  navigator.geolocation.getCurrentPosition(p=>res({lat:+p.coords.latitude.toFixed(5),lng:+p.coords.longitude.toFixed(5)}),rej,{timeout:10000,maximumAge:60000}); });
+const b64=buf=>new Promise((res,rej)=>{ const f=new FileReader(); f.onload=()=>res(f.result.slice(f.result.indexOf(',')+1)); f.onerror=()=>rej(f.error); f.readAsDataURL(new Blob([buf])); });
+const say=t=>{ $('pmsg').textContent=t||''; };
+
+function syncSocial(){
+  const p=session?.record, c=session?.remote;
+  $('hud').classList.toggle('own',!!p); $('hud').classList.toggle('remote',!!c);
+  if(p){ $('share').textContent=p.remoteId?'Shared with people nearby ✓':'Share with people nearby'; $('share').disabled=!!p.remoteId; }
+  if(c){ $('like').textContent='♥ '+(c.liked?'Liked':'Like')+(c.likes?' · '+c.likes:''); $('like').disabled=!!c.liked; }
+}
+let sharing=false;
+async function sharePlace(){
+  const p=session?.record; if(!p||p.remoteId||sharing) return;
+  const name=(window.prompt('Name this place. People nearby will be able to see its name, this surface and where it is.',p.name)||'').trim().slice(0,60);
+  if(!name) return;
+  sharing=true; $('share').disabled=true; say('Sharing…');
+  try{
+    if(p.lat==null){ try{ Object.assign(p,await locate()); }catch(e){ throw new Error('Sharing needs your location. Allow location access for this site, then try again.'); } }
+    const c=await api('/v1/creations',{method:'POST',body:{name,character:cfg.character,move:cfg.move,lat:p.lat,lng:p.lng,aspect:p.H,target:await b64(p.mind)}});
+    p.name=name; p.remoteId=c.id; p.cfg={...cfg}; await db.put(p).catch(()=>{});
+    say('Shared. People nearby can now find it.');
+  }catch(e){ say(e.status===422?'That name isn’t allowed. Everything here has to be OK for all ages.':e.message); }
+  sharing=false; syncSocial();
+}
+async function likePlace(){
+  const c=session?.remote; if(!c||c.liked) return;
+  try{ const r=await api(`/v1/creations/${c.id}/like`,{method:'POST'}); c.likes=r.likes; c.liked=true; say(''); syncSocial(); }catch(e){ say(e.message); }
+}
+async function flagPlace(){
+  const c=session?.remote; if(!c||!confirm('Report this place as not OK for all ages?')) return;
+  try{ await api(`/v1/creations/${c.id}/flag`,{method:'POST',body:{reason:'reported in app'}}); goHome('Thanks. That place has been reported.'); }catch(e){ say(e.message); }
+}
+const nearOn=()=>{ try{ return localStorage.getItem('pp-near')==='1'; }catch(e){ return false; } };
+async function loadNearby(){
+  const el=$('nearby'), m=$('nearMsg'), btn=$('findNearby');
+  btn.style.display='none'; m.textContent='Looking around…';
+  let here; try{ here=await locate(); }catch(e){ el.innerHTML=''; m.textContent='Allow location access for this site to see places near you.'; btn.style.display='block'; return; }
+  try{
+    const {items}=await api(`/v1/creations?lat=${here.lat}&lng=${here.lng}`);
+    let mine=new Set(); try{ mine=new Set((await db.all()).map(p=>p.remoteId).filter(Boolean)); }catch(e){}
+    try{ localStorage.setItem('pp-near','1'); }catch(e){}
+    el.innerHTML=''; const list=items.filter(c=>c.hasTarget);
+    m.textContent=list.length?'':'Nothing within 2 km yet. Share one of your places to be the first.';
+    for(const c of list){
+      const row=document.createElement('div'); row.className='place near';
+      const meta=document.createElement('button'); meta.className='meta';
+      const b=document.createElement('b'); b.textContent=c.name;
+      const sp=document.createElement('span');
+      const d=c.distanceKm<1?Math.max(10,Math.round(c.distanceKm*100)*10)+' m':c.distanceKm.toFixed(1)+' km';
+      sp.textContent=[d, c.character+', '+c.move, c.likes?'♥ '+c.likes:'', mine.has(c.id)?'yours':''].filter(Boolean).join(' · ');
+      const a=document.createElement('a'); a.href=`https://maps.apple.com/?ll=${c.lat},${c.lng}&q=${encodeURIComponent(c.name)}`; a.textContent=' · map'; a.addEventListener('click',e=>e.stopPropagation());
+      meta.append(b,sp,a); meta.addEventListener('click',()=>openRemote(c)); row.append(meta); el.append(row);
+    }
+  }catch(e){ el.innerHTML=''; m.textContent=e.message; btn.style.display='block'; }
+}
+async function openRemote(c){
+  $('busyText').textContent='Fetching this place…'; $('bar').style.visibility='hidden'; show('busy');
+  let blob;
+  try{ const r=await fetch(`${API}/v1/creations/${c.id}/target`); if(!r.ok) throw new Error(r.status); blob=await r.blob(); }
+  catch(e){ return goHome('Could not open that place. Please try again.'); }
+  cfg={character:c.character,move:c.move};
+  startAR({targetSrc:URL.createObjectURL(blob), place:flatPlace(c.aspect), remote:c, hint:'Point the camera at “'+c.name+'”'});
+}
+
+/* =====================================================================
    Session state shared by AR and preview
    ===================================================================== */
 let session=null;   // {stop(), rebuild(), record?}
@@ -428,10 +524,10 @@ function setCfg(next){
   if(session){ session.rebuild(); if(session.record){ session.record.cfg={...cfg}; db.put(session.record).catch(()=>{}); } }
 }
 function endSession(){ if(session){ session.stop(); session=null; } stage.innerHTML=''; document.body.classList.remove('found'); }
-function goHome(text){ endSession(); stopCapture(); msg.textContent=text||''; renderPlaces(); show('home'); }
+function goHome(text){ endSession(); stopCapture(); msg.textContent=text||''; renderPlaces(); if(nearOn()) loadNearby(); show('home'); }
 
 /* ---------- AR ---------- */
-async function startAR({targetSrc, place, record, hint}){
+async function startAR({targetSrc, place, record, remote, hint}){
   $('busyText').textContent='Starting camera…'; $('bar').style.visibility='hidden'; show('busy');
   if(!navigator.mediaDevices?.getUserMedia) return goHome('Camera is not available here. Open this page over https in Safari.');
   let mindarThree;
@@ -450,8 +546,8 @@ async function startAR({targetSrc, place, record, hint}){
     const clock=new THREE.Clock();
     renderer.setAnimationLoop(()=>{ update(clock.getElapsedTime()); renderer.render(scene,camera);
       if(wantShot){ wantShot=false; composeShot(renderer.domElement, stage.querySelector('video')); } });
-    session={rebuild, record, stop(){ renderer.setAnimationLoop(null); try{mindarThree.stop();}catch(e){} renderer.dispose(); }};
-    $('hint').textContent=hint||'Point the camera at the surface'; syncChips(); show('hud');
+    session={rebuild, record, remote, stop(){ renderer.setAnimationLoop(null); try{mindarThree.stop();}catch(e){} renderer.dispose(); }};
+    $('hint').textContent=hint||'Point the camera at the surface'; say(''); syncChips(); syncSocial(); show('hud');
   }catch(e){
     console.error(e); try{mindarThree&&mindarThree.stop();}catch(_){}
     goHome(e&&e.name==='NotAllowedError' ? 'Camera permission was denied. Allow camera access for this site in Safari settings, then reload.'
@@ -482,7 +578,7 @@ function startPreview(){
     update(t); renderer.render(scene,camera);
     if(wantShot){ wantShot=false; composeShot(renderer.domElement,null); } });
   session={rebuild, stop(){ renderer.setAnimationLoop(null); removeEventListener('resize',size); removeEventListener('pointermove',move); removeEventListener('pointerup',up); renderer.dispose(); }};
-  $('hint').textContent='Preview — drag to look around'; syncChips(); show('hud');
+  $('hint').textContent='Preview — drag to look around'; say(''); syncChips(); syncSocial(); show('hud');
 }
 
 /* ---------- Snapshot: camera frame + 3D layer in one picture ---------- */
@@ -581,7 +677,12 @@ function applyPrompt(){
 }
 $('apply').addEventListener('click',applyPrompt);
 $('prompt').addEventListener('keydown',e=>{ if(e.key==='Enter') applyPrompt(); });
+$('share').addEventListener('click',sharePlace);
+$('like').addEventListener('click',likePlace);
+$('flag').addEventListener('click',flagPlace);
+$('findNearby').addEventListener('click',loadNearby);
 renderPlaces();
+if(nearOn()) loadNearby();
 </script>
 </body>
 </html>

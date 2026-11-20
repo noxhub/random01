@@ -19,4 +19,4 @@ likes that earn the creator credits, flags that pull content for review, and cre
 Callers identify themselves with an `x-device-id` header. That is a placeholder until real
 accounts exist, and it is not secure. Not built yet: sign-in, business accounts and ads,
 payments and pre-orders, AI review of flagged content, AI-generated characters.
-The app in `index.html` does not call this API yet.
+The app in `index.html` calls this API for sharing, the Nearby list, likes and reports.
